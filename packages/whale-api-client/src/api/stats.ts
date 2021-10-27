@@ -1,7 +1,8 @@
+import { BigNumber } from 'bignumber.js'
 import { WhaleApiClient } from '../whale.api.client'
 
 export class Stats {
-  constructor (private readonly client: WhaleApiClient) {
+  constructor(private readonly client: WhaleApiClient) {
   }
 
   /**
@@ -9,7 +10,7 @@ export class Stats {
    *
    * @return {Promise<StatsData>}
    */
-  async get (): Promise<StatsData> {
+  async get(): Promise<StatsData> {
     return await this.client.requestData('GET', 'stats')
   }
 }
@@ -39,9 +40,20 @@ export interface StatsData {
     usdt: number
   }
   masternodes: {
-    locked: Array<{weeks: number, tvl: number, count: number}>
+    locked: Array<{ weeks: number, tvl: number, count: number }>
   }
   rewards: {
-    daily: number
+    daily: BigNumber | undefined
+  }
+  emission: {
+    total: number
+    masternode: number
+    dex: number
+    community: number
+    anchor: number
+    burned: number
+  }
+  blockchain: {
+    difficulty: number
   }
 }

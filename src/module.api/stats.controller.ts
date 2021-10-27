@@ -7,10 +7,11 @@ import { PoolPairService } from '@src/module.api/poolpair.service'
 import BigNumber from 'bignumber.js'
 import { PriceTickerMapper } from '@src/module.model/price.ticker'
 import { MasternodeStats, MasternodeStatsMapper } from '@src/module.model/masternode.stats'
+import { BlockchainInfo } from '@defichain/jellyfish-api-core/dist/category/blockchain'
 
 @Controller('/stats')
 export class StatsController {
-  constructor (
+  constructor(
     protected readonly blockMapper: BlockMapper,
     protected readonly priceTickerMapper: PriceTickerMapper,
     protected readonly masternodeStatsMapper: MasternodeStatsMapper,
@@ -21,9 +22,8 @@ export class StatsController {
   }
 
   @Get()
-  async get (): Promise<StatsData> {
-    const block = await this.blockMapper.getHighest()
-    const height = requireValue(block?.height, 'count.blocks')
+  async get(): Promise<StatsData> {
+    const block = requireValue(await this.blockMapper.getHighest(), 'block')
 
     const masternodes = await this.cachedGet('masternodes', this.getMasternodes.bind(this), 300)
     const dailyRewards = await this.getDailyDFIReward()
@@ -31,7 +31,7 @@ export class StatsController {
     return {
       count: {
         ...await this.cachedGet('count', this.getCount.bind(this), 1800),
-        blocks: height
+        blocks: block.height
       },
       burned: await this.cachedGet('burned', this.getBurned.bind(this), 1800),
       tvl: await this.cachedGet('tvl', this.getTVL.bind(this), 300),
@@ -41,6 +41,10 @@ export class StatsController {
       },
       rewards: {
         daily: dailyRewards
+      },
+      emission: await this.cachedGet('emission', this.getEmission.bind(this), 1800),
+      blockchain: {
+        difficulty: block.difficulty
       }
     }
   }
@@ -50,7 +54,7 @@ export class StatsController {
     return requireValue(object, field)
   }
 
-  private async getCount (): Promise<StatsData['count']> {
+  private async getCount(): Promise<StatsData['count']> {
     const tokens = await this.rpcClient.token.listTokens({ including_start: true, start: 0, limit: 1000 }, false)
     const prices = await this.priceTickerMapper.query(1000)
     const masternodes = await this.masternodeStatsMapper.getLatest()
@@ -63,7 +67,7 @@ export class StatsController {
     }
   }
 
-  private async getDailyDFIReward (): Promise<BigNumber | undefined> {
+  private async getDailyDFIReward(): Promise<BigNumber | undefined> {
     return await this.cache.get<BigNumber>('LP_DAILY_DFI_REWARD', async () => {
       const rpcResult = await this.rpcClient.masternode.getGov('LP_DAILY_DFI_REWARD')
       return new BigNumber(rpcResult.LP_DAILY_DFI_REWARD)
@@ -72,7 +76,7 @@ export class StatsController {
     })
   }
 
-  private async getTVL (): Promise<StatsData['tvl']> {
+  private async getTVL(): Promise<StatsData['tvl']> {
     let dex = new BigNumber(0)
     const pairs = await this.rpcClient.poolpair.listPoolPairs({ including_start: true, start: 0, limit: 1000 }, true)
     for (const pair of Object.values(pairs)) {
@@ -93,7 +97,7 @@ export class StatsController {
     }
   }
 
-  private async getBurned (): Promise<StatsData['burned']> {
+  private async getBurned(): Promise<StatsData['burned']> {
     const { emissionburn, amount, feeburn } = await this.rpcClient.account.getBurnInfo()
     return {
       address: amount.toNumber(),
@@ -103,20 +107,20 @@ export class StatsController {
     }
   }
 
-  private async getPrice (): Promise<StatsData['price']> {
+  private async getPrice(): Promise<StatsData['price']> {
     const usdt = await this.poolPairService.getUSDT_PER_DFI()
     return {
       usdt: requireValue(usdt, 'price.usdt').toNumber()
     }
   }
 
-  private async getMasternodes (): Promise<StatsData['masternodes']> {
+  private async getMasternodes(): Promise<StatsData['masternodes']> {
     const latest = await this.masternodeStatsMapper.getLatest()
     const masternodeStats = requireValue(latest, 'masternode.stats')
     return await this.mapMasternodeStats(masternodeStats)
   }
 
-  private async mapMasternodeStats (masternodeStats: MasternodeStats): Promise<StatsData['masternodes']> {
+  private async mapMasternodeStats(masternodeStats: MasternodeStats): Promise<StatsData['masternodes']> {
     const optionalUsdt = await this.poolPairService.getUSDT_PER_DFI()
     const usdt = requireValue(optionalUsdt, 'price.usdt')
     return {
@@ -128,9 +132,60 @@ export class StatsController {
       })
     }
   }
+
+  private async getEmission(): Promise<StatsData['emission']> {
+    const blockInfo = requireValue(await this.getBlockChainInfo(), 'emission')
+    const eunosHeight = blockInfo.softforks.eunos.height ?? 0
+
+    return getEmission(eunosHeight, blockInfo.blocks)
+  }
+
+  private async getBlockChainInfo(): Promise<BlockchainInfo | undefined> {
+    return await this.cache.get<BlockchainInfo>('BLOCK_INFO', async () => {
+      return await this.rpcClient.blockchain.getBlockchainInfo()
+    })
+  }
 }
 
-function requireValue<T> (value: T | undefined, name: string): T {
+export function getEmission(eunosHeight: number, height: number): StatsData['emission'] {
+  const total = getBlockSubsidy(eunosHeight, height)
+  const masternode = new BigNumber(new BigNumber('0.3333').times(total).toFixed(8))
+  const dex = new BigNumber(new BigNumber('0.2545').times(total).toFixed(8))
+  const community = new BigNumber(new BigNumber('0.0491').times(total).toFixed(8))
+  const anchor = new BigNumber(new BigNumber('0.0002').times(total).toFixed(8))
+  const burned = total.minus(masternode.plus(dex).plus(community).plus(anchor))
+
+  return {
+    masternode: masternode.toNumber(),
+    dex: dex.toNumber(),
+    community: community.toNumber(),
+    anchor: anchor.toNumber(),
+    burned: burned.toNumber(),
+    total: total.toNumber()
+  }
+}
+
+export function getBlockSubsidy(eunosHeight: number, height: number): BigNumber {
+  let blockSubsidy = new BigNumber(405.04)
+
+  if (height >= eunosHeight) {
+    const reductionAmount = new BigNumber(0.01658) // 1.658%
+    const reductions = Math.floor((height - eunosHeight) / 32690) // Two weeks
+
+    for (let i = reductions; i > 0; i--) {
+      const amount = reductionAmount.times(blockSubsidy)
+      if (amount.lte(0.00001)) {
+        return new BigNumber(0)
+      }
+
+      blockSubsidy = blockSubsidy.minus(amount)
+    }
+  }
+
+  return blockSubsidy
+}
+
+function requireValue<T>(value: T | undefined, name: string): T {
   if (value === undefined) {
     throw new Error(`failed to compute: ${name}`)
   }
